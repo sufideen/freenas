@@ -63,10 +63,10 @@ class EtcService(Service):
         #
         # Coming soon
         #
-        # 'kerberos': [
-        #    {'type': 'mako', 'path': 'krb5.conf'},
-        #    {'type': 'mako', 'path': 'krb5.keytab'},
-        # ],
+        'kerberos': [
+            {'type': 'mako', 'path': 'krb5.conf'},
+            {'type': 'py', 'path': 'krb5.keytab.py'},
+        ],
 
         'ldap': [
             {'type': 'mako', 'path': 'local/openldap/ldap.conf'},
@@ -166,7 +166,7 @@ class EtcService(Service):
             st = os.stat(outfile)
             if 'owner' in entry and entry['owner']:
                 try:
-                    pw = pwd.getpwnam(entry['owner'])
+                    pw = await self.middleware.run_in_thread(pwd.getpwnam, entry['owner'])
                     if st.st_uid != pw.pw_uid:
                         os.chown(outfile, pw.pw_uid, -1)
                         changes = True
@@ -174,7 +174,7 @@ class EtcService(Service):
                     pass
             if 'group' in entry and entry['group']:
                 try:
-                    gr = grp.getgrnam(entry['group'])
+                    gr = await self.middleware.run_in_thread(grp.getgrnam, entry['group'])
                     if st.st_gid != gr.gr_gid:
                         os.chown(outfile, -1, gr.gr_gid)
                         changes = True

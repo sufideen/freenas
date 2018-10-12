@@ -41,7 +41,7 @@ from django.http import Http404, QueryDict
 from freenasUI.account.models import bsdUsers
 from freenasUI.common.log import log_traceback
 from freenasUI.freeadmin.apppool import appPool
-from freenasUI.freeadmin.models.fields import DictField, MultiSelectField
+from freenasUI.freeadmin.models.fields import DictField, ListField, MultiSelectField
 from freenasUI.middleware.exceptions import MiddlewareError
 from freenasUI.middleware.form import handle_middleware_validation
 from freenasUI.services.exceptions import ServiceFailed
@@ -276,6 +276,8 @@ class DojoModelResource(ResourceMixin, ModelResource):
             return fields.ListField
         if isinstance(f, DictField):
             return fields.DictField
+        if isinstance(f, ListField):
+            return fields.ListField
         else:
             return super(DojoModelResource, cls).api_field_from_django_field(f, default=default)
 
@@ -380,7 +382,7 @@ class DojoModelResource(ResourceMixin, ModelResource):
 
         """
         Get rid of None values, it means they were not
-        passed to the API and will faill serialization
+        passed to the API and will fail serialization
         """
         querydict = data.copy()
         for key, val in list(querydict.items()):

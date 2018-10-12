@@ -154,6 +154,7 @@ generate_nginx_conf()
 	local default_ui="ui"
 	local dhparams_file="/data/dhparam.pem"
 	local dojo=$(env PYTHONPATH=/usr/local/www/freenasUI/ /usr/local/bin/python -B -S -c 'import settings; print(settings.DOJANGO_DOJO_VERSION)')
+	local ips="$addr $addr6"
 
 	[ -s /data/dhparam.pem ] || openssl dhparam -rand - 2048 > /data/dhparam.pem
 	[ -s /data/dhparam1024.pem ] || openssl dhparam -rand - 1024 > /data/dhparam1024.pem
@@ -186,7 +187,7 @@ http {
 
     sendfile        on;
     #tcp_nopush     on;
-    client_max_body_size 800m;
+    client_max_body_size 1000m;
 
     #keepalive_timeout  0;
     keepalive_timeout  65;
@@ -219,21 +220,39 @@ __EOF__
 		local validcert=0
 		${OPENSSL} x509 -in "${httpdcert}" -noout -text -dates -purpose > /dev/null 2>&1
 		let "validcert |= $?" > /dev/null
+
+		local keylength=0
 		${OPENSSL} rsa -in "${httpdkey}" -check -noout > /dev/null 2>&1
 		let "validcert |= $?" > /dev/null
-		# Checking if the key bit lenght is greater than or equal to 1024
-		local safecert=$(${OPENSSL} rsa -in "${httpdkey}" -text -noout | grep "Private-Key" | egrep -o '[0-9]' | tr -d "\n")
-
-		if [ ${validcert} -eq 0 -a ${safecert} -ge 1024 ]; then
+		if [ ${validcert} -eq 0 ]; then
+            		# Checking if the key bit length is greater than or equal to 1024
+			local safecert=$(${OPENSSL} rsa -in "${httpdkey}" -text -noout | grep "Private-Key" | egrep -o '[0-9]' | tr -d "\n")
+			keylength=1024
+		else
+			keylength=163
+			${OPENSSL} ec -in "${httpdkey}" -text -noout > /dev/null 2>&1
+			if [ $? -eq 0 ]; then
+				validcert=0
+			fi
+			local safecert=$(${OPENSSL} ec -in "${httpdkey}" -text -noout | grep "Private-Key" | egrep -o '[0-9]' | tr -d "\n")
+		fi
+		if [ ${validcert} -eq 0 -a ${safecert} -ge ${keylength} ]; then
 			working_ssl=true
 			# Delete this file (if it exists) now that we have a valid cert (else the alert ui keeps complaining)
 			if [ -f /tmp/alert_invalid_ssl_nginx ]; then
-			    rm /tmp/alert_invalid_ssl_nginx
+				rm /tmp/alert_invalid_ssl_nginx
 			fi
 
+			for ip in $ips
+			do
+				if [ -z "$(echo ${ip}|grep .*:.*)" ]; then
+					echo "	listen			${ip}:${httpsport} default_server ssl http2;"
+				else
+					echo "	listen			[${ip}]:${httpsport} default_server ssl http2;"
+				fi
+			done
+
 			cat << __EOF__
-	listen			${addr}:${httpsport} default_server ssl http2;
-	listen			[${addr6}]:${httpsport} default_server ssl http2;
 
 	ssl_certificate		"${httpdcert}";
 	ssl_certificate_key	"${httpdkey}";
@@ -257,15 +276,23 @@ __EOF__
 			port=80
 			touch /tmp/alert_invalid_ssl_nginx
 			# The below to inform the user why his cert was invalidated (if it was invalidated on the basis of key length)
-			if [ ${safecert} -lt 1024 ]; then
+			if [ ${safecert} -lt ${keylength} ]; then
 			    echo "${safecert}" > /tmp/alert_invalid_ssl_nginx
 			fi
 		fi
 	fi
 
 	if [ ! ${working_ssl} -o "${proto}" = "http" -o "${proto}" = "httphttps" ]; then
-		echo "        listen       ${addr}:${port};"
-		echo "        listen       [${addr6}]:${port};"
+
+		for ip in $ips
+		do
+			if [ -z "$(echo ${ip}|grep .*:.*)" ]; then
+				echo "        listen       ${ip}:${port};"
+			else
+				echo "        listen       [${ip}]:${port};"
+			fi
+		done
+
 	fi
 
 	if ! is_freenas; then
@@ -425,10 +452,17 @@ __EOF__
 __EOF__
 
 	if [ "${proto}" = "https" -a "${working_ssl}" = true -a "${httpsredirect}" = "1" ]; then
+		echo "    server {"
+		for ip in $ips
+			do
+				if [ -z "$(echo ${ip}|grep .*:.*)" ]; then
+					echo "	listen ${ip}:80;"
+				else
+					echo "	listen [${ip}]:80;"
+				fi
+			done
+
 		cat << __EOF__
-    server {
-	listen ${addr}:80;
-	listen [${addr6}]:80;
 	server_name localhost;
 	return 307 https://\$host:${httpsport}\$request_uri;
     }
@@ -552,8 +586,8 @@ get_nginx_settings()
 	)
 
 	local proto=$(echo ${settings}|cut -f1 -d"|" -s|tr A-Z a-z)
-	local addr=$(echo ${settings}|cut -f2 -d"|" -s)
-	local addr6=$(echo ${settings}|cut -f3 -d"|" -s)
+	local addr="$(echo ${settings}|cut -f2 -d"|" -s| tr '[\[,\]\"]' ' ' )"
+	local addr6="$(echo ${settings}|cut -f3 -d"|" -s| tr '[\[,\]\"]' ' ' )"
 	local port=$(echo ${settings}|cut -f4 -d"|" -s)
 	local httpsport=$(echo ${settings}|cut -f5 -d"|" -s)
 	local httpsredirect=$(echo ${settings}|cut -f6 -d"|" -s)
@@ -571,15 +605,27 @@ get_nginx_settings()
 		port="80"
 	fi
 
-	if [ "${addr}" != "0.0.0.0" -a \
-		-z "$(/sbin/ifconfig -a|grep ${addr})" ]; then
-		addr="0.0.0.0"
-	fi
+	initialize_ip_vars(){
+		local field=""
+		local val="${1}"
+		local skip="${2}"
+		for ip in $val
+		do
+			if [ "${ip}" != "${skip}" -a \
+				-z "$(/sbin/ifconfig -a|grep ${ip})" ]; then
+					ip=$skip
+			fi
 
-	if [ "${addr6}" != "::" -a \
-		-z "$(/sbin/ifconfig -a|grep ${addr6})" ]; then
-		addr6="::"
-	fi
+			if [ -z "$(echo ${field}|grep ${ip})" ]; then
+				field="$field $ip"
+			fi
+		done
+
+		echo "${field}"
+	}
+
+	addr=$( initialize_ip_vars "$addr" "0.0.0.0" )
+	addr6=$( initialize_ip_vars "$addr6" "::" )
 
 	echo "${proto}|${addr}|${addr6}|${port}|${httpsport}|${httpsredirect}"
 }
@@ -624,6 +670,6 @@ ix_nginx_start()
 name="ix-nginx"
 start_cmd='ix_nginx_start'
 stop_cmd=':'
-            
+
 load_rc_config $name
 run_rc_command "$1"

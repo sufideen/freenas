@@ -5,7 +5,6 @@ import errno
 import os
 import re
 import shutil
-import socket
 import sys
 
 if '/usr/local/lib' not in sys.path:
@@ -277,7 +276,7 @@ class UpdateService(Service):
         data['version'] = manifest.Version()
         return data
 
-    @accepts(Str('path'))
+    @accepts(Str('path', null=True, default=None))
     async def get_pending(self, path=None):
         """
         Gets a list of packages already downloaded and ready to be applied.
@@ -408,12 +407,11 @@ class UpdateService(Service):
                 sequence = ''
 
             changelog = get_changelog(train, start=sequence, end=update.Sequence())
-            hostname = socket.gethostname()
 
             try:
                 # FIXME: Translation
                 self.middleware.call_sync('mail.send', {
-                    'subject': '{}: {}'.format(hostname, 'Update Available'),
+                    'subject': 'Update Available',
                     'text': '''A new update is available for the %(train)s train.
 Version: %(version)s
 Changelog:

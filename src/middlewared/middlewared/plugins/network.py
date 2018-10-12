@@ -126,6 +126,7 @@ class NetworkConfigurationService(ConfigService):
             Bool('netwait_enabled'),
             List('netwait_ip', items=[Str('netwait_ip')]),
             Str('hosts'),
+            update=True
         )
     )
     async def do_update(self, data):
@@ -469,7 +470,15 @@ class InterfacesService(Service):
 
             if iface.parent != vlan['vlan_pint'] or iface.tag != vlan['vlan_tag'] or iface.pcp != vlan['vlan_pcp']:
                 iface.unconfigure()
-                iface.configure(vlan['vlan_pint'], vlan['vlan_tag'], vlan['vlan_pcp'])
+                try:
+                    iface.configure(vlan['vlan_pint'], vlan['vlan_tag'], vlan['vlan_pcp'])
+                except FileNotFoundError:
+                    self.logger.warn(
+                        'VLAN %s parent interface %s not found, skipping.',
+                        vlan['vlan_vint'],
+                        vlan['vlan_pint'],
+                    )
+                    continue
 
             try:
                 parent_iface = netif.get_interface(iface.parent)
@@ -871,11 +880,13 @@ class StaticRouteService(CRUDService):
     @accepts(Dict(
         'staticroute_create',
         IPAddr('destination', cidr=True),
-        IPAddr('gateway'),
+        IPAddr('gateway', allow_zone_index=True),
         Str('description'),
         register=True
     ))
     async def do_create(self, data):
+        self._validate('staticroute_create', data)
+
         await self.lower(data)
 
         id = await self.middleware.call(
@@ -898,6 +909,8 @@ class StaticRouteService(CRUDService):
         old = await self._get_instance(id)
         new = old.copy()
         new.update(data)
+
+        self._validate('staticroute_update', data)
 
         await self.lower(data)
         await self.middleware.call(
@@ -922,6 +935,15 @@ class StaticRouteService(CRUDService):
     async def upper(self, data):
         data['description'] = data['description'].upper()
         return data
+
+    def _validate(self, schema_name, data):
+        verrors = ValidationErrors()
+
+        if (':' in data['destination']) != (':' in data['gateway']):
+            verrors.add(f'{schema_name}.destination', 'Destination and gateway address families must match')
+
+        if verrors:
+            raise verrors
 
 
 class DNSService(Service):

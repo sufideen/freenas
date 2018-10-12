@@ -61,6 +61,7 @@ define([
       url: "",
       credentials: "",
       buckets: {},
+      bucketTitle: {},
       taskSchemas: {},
       templateString: template,
       _buckets: null,
@@ -83,7 +84,8 @@ define([
         for(var i=0;i<credentials.length;i++) {
           creds.push({label: credentials[i][0], value: credentials[i][1]});
           this.buckets[credentials[i][1]] = credentials[i][2];
-          this.taskSchemas[credentials[i][1]] = credentials[i][3];
+          this.bucketTitle[credentials[i][1]] = credentials[i][3];
+          this.taskSchemas[credentials[i][1]] = credentials[i][4];
         }
 
         if(!gettext) {
@@ -177,9 +179,11 @@ define([
                 name: "bucket",
               }, this.dapBucketsInput);
             }
-            this.dapBucketInputError.innerHTML = "Error " + bucketsError.error + "<pre style='white-space: pre-wrap;'>" + entities.encode(bucketsError.reason) + "</pre>Please enter bucket name manually:";
+            this.dapBucketInputError.innerHTML = "Error " + bucketsError.error + "<pre style='white-space: pre-wrap;'>" + entities.encode(bucketsError.reason) + "</pre>Please enter " + this.bucketTitle[credentialId].toLowerCase() + " name manually:";
             if(this.initial.bucket) this._bucketsInput.set('value', this.initial.bucket);
           }
+          this.dapBucketLabel.innerHTML = this.bucketTitle[credentialId];
+          this.dapBucketInputLabel.innerHTML = this.bucketTitle[credentialId];
         } else {
           domStyle.set(this.dapBucket, "display", "none");
           domStyle.set(this.dapBucketInput, "display", "none");
@@ -198,18 +202,25 @@ define([
             var property = this.taskSchemas[credentialId][i];
 
             var id = "id_attributes_" + property.property;
-            var input = "<input type='text' id='" + id + "'>";
-            if (property.schema.enum)
+            if (property.schema.type.indexOf("boolean") != -1)
             {
-                input = "<select id='" + id + "'>";
-                for (var i = 0; i < property.schema.enum.length; i++)
-                {
-                    input += '<option>' + property.schema.enum[i] + '</option>';
-                }
-                input += '</select>';
+                html += '<div style="margin-bottom: 5px;"><label><input type="checkbox" id="' + id + '" value="1"> ' + property.schema.title + '</label></div>';
             }
+            else
+            {
+                var input = "<input type='text' id='" + id + "'>";
+                if (property.schema.enum)
+                {
+                    input = "<select id='" + id + "'>";
+                    for (var i = 0; i < property.schema.enum.length; i++)
+                    {
+                        input += '<option>' + property.schema.enum[i] + '</option>';
+                    }
+                    input += '</select>';
+                }
 
-            html += '<div style="margin-bottom: 5px;"><div>' + property.schema.title + '</div><div>' + input + '</div></div>';
+                html += '<div style="margin-bottom: 5px;"><div>' + property.schema.title + '</div><div>' + input + '</div></div>';
+            }
         }
         this.dapEtc.innerHTML = html;
         for (var i = 0; i < this.taskSchemas[credentialId].length; i++)
@@ -220,7 +231,14 @@ define([
 
             if (this.initial[property.property] !== undefined)
             {
-                document.getElementById(id).value = this.initial[property.property];
+                if (property.schema.type.indexOf("boolean") != -1)
+                {
+                    document.getElementById(id).checked = this.initial[property.property];
+                }
+                else
+                {
+                    document.getElementById(id).value = this.initial[property.property];
+                }
             }
         }
       },
@@ -240,7 +258,11 @@ define([
             var property = this.taskSchemas[value.credential][i];
             var id = "id_attributes_" + property.property;
             if (document.getElementById(id)) {
-              value[property.property] = document.getElementById(id).value;
+              if (property.schema.type.indexOf("boolean") != -1) {
+                value[property.property] = document.getElementById(id).checked;
+              } else {
+                value[property.property] = document.getElementById(id).value;
+              }
               if (value[property.property] === "null") {
                 value[property.property] = null;
               }

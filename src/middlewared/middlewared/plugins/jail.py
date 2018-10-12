@@ -4,12 +4,15 @@ import time
 import subprocess as su
 
 import iocage_lib.iocage as ioc
+import iocage_lib.ioc_exceptions as ioc_exceptions
+
 import libzfs
 import requests
 import itertools
 import pathlib
 import json
 import sqlite3
+import errno
 from iocage_lib.ioc_check import IOCCheck
 from iocage_lib.ioc_clean import IOCClean
 from iocage_lib.ioc_fetch import IOCFetch
@@ -19,12 +22,11 @@ from iocage_lib.ioc_json import IOCJson
 from iocage_lib.ioc_list import IOCList
 from iocage_lib.ioc_upgrade import IOCUpgrade
 
-from middlewared.client import ClientException
 from middlewared.schema import Bool, Dict, Int, List, Str, accepts
 from middlewared.service import CRUDService, job, private
 from middlewared.service_exception import CallError, ValidationErrors
 from middlewared.utils import filter_list
-from middlewared.validators import IpInUse, ShouldBe
+from middlewared.validators import IpInUse, MACAddr
 
 
 SHUTDOWN_LOCK = asyncio.Lock()
@@ -39,7 +41,7 @@ class JailService(CRUDService):
     # using `process_pool`
     # @filterable
     @accepts(
-        List('query-filters'),
+        List('query-filters', default=[]),
         Dict('query-options', additional_attrs=True),
     )
     def query(self, filters=None, options=None):
@@ -79,7 +81,7 @@ class JailService(CRUDService):
                             jail['ip4_addr'] = f'{interface}|' \
                                 f'{out.splitlines()[2].split()[1].decode()}'
                         else:
-                            jail['ip4_address'] = 'DHCP (not running)'
+                            jail['ip4_addr'] = 'DHCP (not running)'
                     jails.append(jail)
         except BaseException:
             # Brandon is working on fixing this generic except, till then I
@@ -117,30 +119,37 @@ class JailService(CRUDService):
         return await self.middleware.call('jail.create_job', options)
 
     @private
-    @job()
+    @job(lock=lambda args: f'jail_create:{args[-1]["uuid"]}')
     def create_job(self, job, options):
         verrors = ValidationErrors()
+        uuid = options["uuid"]
+
+        job.set_progress(0, f'Creating: {uuid}')
 
         try:
-            self.check_jail_existence(options['uuid'], skip=False)
+            self.check_jail_existence(uuid, skip=False)
 
             verrors.add(
                 'uuid',
-                f'A jail with uuid {options["uuid"]} already exists'
+                f'A jail with name {uuid} already exists'
             )
             raise verrors
         except CallError:
-            # A jail does not exist with the provided uuid, we can create one now
+            # A jail does not exist with the provided name, we can create one
+            # now
 
-            self.validate_ips(verrors, options)
+            verrors = self.common_validation(verrors, options)
+
+            if verrors:
+                raise verrors
+
             job.set_progress(20, 'Initial validation complete')
 
-            iocage = ioc.IOCage(skip_jails=True)
+        iocage = ioc.IOCage(skip_jails=True)
 
         release = options["release"]
         template = options.get("template", False)
         pkglist = options.get("pkglist", None)
-        uuid = options["uuid"]
         basejail = options["basejail"]
         empty = options["empty"]
         short = options["short"]
@@ -156,6 +165,7 @@ class JailService(CRUDService):
                 not template and
                 not empty
         ):
+            job.set_progress(50, f'{release} missing, calling fetch')
             self.middleware.call_sync(
                 'jail.fetch', {"release": release}, job=True
             )
@@ -175,26 +185,32 @@ class JailService(CRUDService):
         if err:
             raise CallError(msg)
 
+        job.set_progress(100, f'Created: {uuid}')
+
         return True
 
     @private
     def validate_ips(self, verrors, options, schema='options.props', exclude=None):
         for item in options['props']:
             for f in ('ip4_addr', 'ip6_addr'):
+                # valid ip values can be
+                # "none" "interface|accept_rtadv" "interface|ip/subnet" "interface|ip"
+                # we explicitly check these
                 if f in item:
-                    for ip in item.split('=')[1].split(','):
+                    for ip in [
+                        ip.split('|')[1].split('/')[0] if '|' in ip else ip.split('/')[0]
+                        for ip in item.split('=')[1].split(',')
+                        if ip != 'none' and (ip.count('|') and ip.split('|')[1] != 'accept_rtadv')
+                    ]:
                         try:
                             IpInUse(self.middleware, exclude)(
-                                ip.split('|')[1].split('/')[0] if '|' in ip else ip.split('/')[0]
+                                ip
                             )
-                        except ShouldBe as e:
+                        except ValueError as e:
                             verrors.add(
                                 f'{schema}.{f}',
                                 str(e)
                             )
-
-        if verrors:
-            raise verrors
 
     @accepts(Str("jail"), Dict(
              "options",
@@ -212,16 +228,10 @@ class JailService(CRUDService):
 
         jail = self.query([['id', '=', jail]], {'get': True})
 
-        exclude_ips = [
-            ip.split('|')[1].split('/')[0] if '|' in ip else ip.split('/')[0]
-            for f in ('ip4_addr', 'ip6_addr') for ip in jail[f].split(',')
-            if ip != 'none'
-        ]
+        verrors = self.common_validation(verrors, options, True, jail)
 
-        self.validate_ips(
-            verrors, {'props': [f'{k}={v}' for k, v in options.items()]},
-            'options', exclude_ips
-        )
+        if verrors:
+            raise verrors
 
         for prop, val in options.items():
             p = f"{prop}={val}"
@@ -236,6 +246,71 @@ class JailService(CRUDService):
 
         return True
 
+    @private
+    def common_validation(self, verrors, options, update=False, jail=None):
+        if not update:
+            # Ensure that api call conforms to format set by iocage for props
+            # Example 'key=value'
+
+            for value in options['props']:
+                if '=' not in value:
+                    verrors.add(
+                        'options.props',
+                        'Please follow the format specified by iocage for api calls'
+                        'e.g "key=value"'
+                    )
+                    break
+
+            if verrors:
+                raise verrors
+
+            # normalise vnet mac address
+            # expected format here is 'vnet0_mac=00-D0-56-F2-B5-12,00-D0-56-F2-B5-13'
+            vnet_macs = {
+                f.split('=')[0]: f.split('=')[1] for f in options['props']
+                if any(f'vnet{i}_mac' in f.split('=')[0] for i in range(0, 4))
+            }
+
+            self.validate_ips(verrors, options)
+        else:
+            vnet_macs = {
+                key: value for key, value in options.items()
+                if any(f'vnet{i}_mac' in key for i in range(0, 4))
+            }
+
+            exclude_ips = [
+                ip.split('|')[1].split('/')[0] if '|' in ip else ip.split('/')[0]
+                for f in ('ip4_addr', 'ip6_addr') for ip in jail[f].split(',')
+                if ip not in ('none', 'DHCP (not running)')
+            ]
+
+            self.validate_ips(
+                verrors, {'props': [f'{k}={v}' for k, v in options.items()]},
+                'options', exclude_ips
+            )
+
+        # validate vnetX_mac addresses
+        for key, value in vnet_macs.items():
+            if value and value != 'none':
+                value = value.replace(',', ' ')
+                try:
+                    for mac in value.split():
+                        MACAddr()(mac)
+
+                    if (
+                        len(value.split()) != 2 or
+                        any(value.split().count(v) > 1 for v in value.split())
+                    ):
+                        raise ValueError('Exception')
+                except ValueError:
+                    verrors.add(
+                        key,
+                        'Please Enter two valid and different '
+                        f'space/comma-delimited MAC addresses for {key}.'
+                    )
+
+        return verrors
+
     @accepts(Str("jail"))
     def do_delete(self, jail):
         """Takes a jail and destroys it."""
@@ -248,7 +323,10 @@ class JailService(CRUDService):
 
     @private
     def check_dataset_existence(self):
-        IOCCheck()
+        try:
+            IOCCheck()
+        except ioc_exceptions.PoolNotActivated as e:
+            raise CallError(e, errno=errno.ENOENT)
 
     @private
     def check_jail_existence(self, jail, skip=True):
@@ -278,30 +356,35 @@ class JailService(CRUDService):
             Str("server", default="download.freebsd.org"),
             Str("user", default="anonymous"),
             Str("password", default="anonymous@"),
-            Str("name", default=None),
+            Str("name", default=None, null=True),
             Bool("accept", default=True),
-            List("props"),
+            List("props", default=[]),
             List(
                 "files",
                 default=["MANIFEST", "base.txz", "lib32.txz", "doc.txz"]
             ),
-            Str("branch", default=None)
+            Str("branch", default=None, null=True)
         )
     )
     @job(lock=lambda args: f"jail_fetch:{args[-1]}")
     def fetch(self, job, options):
         """Fetches a release or plugin."""
         fetch_output = {'error': False, 'install_notes': []}
+        release = options.get('release', None)
 
         verrors = ValidationErrors()
 
         self.validate_ips(verrors, options)
 
-        def progress_callback(content):
+        if verrors:
+            raise verrors
+
+        def progress_callback(content, exception):
             level = content['level']
             msg = content['message'].strip('\n')
+            rel_up = f'* Updating {release} to the latest patch level... '
 
-            if job.progress['percent'] == 90:
+            if job.progress['percent'] == 90 and options['name'] is not None:
                 for split_msg in msg.split('\n'):
                     fetch_output['install_notes'].append(split_msg)
 
@@ -311,21 +394,33 @@ class JailService(CRUDService):
 
             job.set_progress(None, msg)
 
-            if '  These pkgs will be installed:' in msg:
-                job.set_progress(50, msg)
-            elif 'Installing plugin packages:' in msg:
-                job.set_progress(75, msg)
-            elif 'Command output:' in msg:
-                job.set_progress(90, msg)
+            if options['name'] is None:
+                if 'Extracting: base.txz' in msg:
+                    job.set_progress(25, msg)
+                elif 'Extracting: lib32.txz' in msg:
+                    job.set_progress(50, msg)
+                elif 'Extracting: doc.txz' in msg:
+                    job.set_progress(75, msg)
+                elif 'Extracting: src.txz' in msg:
+                    job.set_progress(90, msg)
+                elif rel_up in msg:
+                    job.set_progress(95, msg)
+            else:
+                if '  These pkgs will be installed:' in msg:
+                    job.set_progress(50, msg)
+                elif 'Installing plugin packages:' in msg:
+                    job.set_progress(75, msg)
+                elif 'Command output:' in msg:
+                    job.set_progress(90, msg)
 
         self.check_dataset_existence()  # Make sure our datasets exist.
-        start_msg = None
-        finaL_msg = None
+        start_msg = f'{release} being fetched'
+        final_msg = f'{release} fetched'
 
         if options["name"] is not None:
             options["plugin_file"] = True
             start_msg = 'Starting plugin install'
-            finaL_msg = f"Plugin: {options['name']} installed"
+            final_msg = f"Plugin: {options['name']} installed"
 
         options["accept"] = True
 
@@ -339,7 +434,7 @@ class JailService(CRUDService):
             fetch_output['install_notes'] += job.progress['description'].split(
                 '\n')
 
-        job.set_progress(100, finaL_msg)
+        job.set_progress(100, final_msg)
 
         return fetch_output
 
@@ -358,13 +453,8 @@ class JailService(CRUDService):
                         'cache.get', 'iocage_remote_plugins')
 
                     return resource_list
-                except ClientException as e:
-                    # The jail plugin runs in another process, it's seen as
-                    # a client
-                    if e.trace and e.trace['class'] == 'KeyError':
-                        pass  # It's either new or past cache date
-                    else:
-                        raise
+                except KeyError:
+                    pass
 
                 resource_list = iocage.fetch(list=True, plugins=True,
                                              header=False)
@@ -412,13 +502,8 @@ class JailService(CRUDService):
                         'cache.get', 'iocage_remote_releases')
 
                     return resource_list
-            except ClientException as e:
-                # The jail plugin runs in another process, it's seen as
-                # a client
-                if e.trace and e.trace['class'] == 'KeyError':
-                    pass  # It's either new or past cache date
-                else:
-                    raise
+            except KeyError:
+                pass
 
             resource_list = iocage.fetch(list=True, remote=remote, http=True)
 
@@ -488,14 +573,14 @@ class JailService(CRUDService):
         """Adds an fstab mount to the jail"""
         uuid, _, iocage = self.check_jail_existence(jail, skip=False)
         status, jid = IOCList.list_get_jid(uuid)
+        action = options['action'].lower()
 
-        if status:
+        if status and action != 'list':
             raise CallError(
                 f'{jail} should not be running when adding a mountpoint')
 
         verrors = ValidationErrors()
 
-        action = options['action'].lower()
         source = options.get('source')
         if source:
             if not os.path.exists(source):
@@ -524,6 +609,8 @@ class JailService(CRUDService):
                         'options.destination',
                         'Destination directory should be empty'
                     )
+            else:
+                os.makedirs(destination)
 
             # fstab hates spaces ;)
             destination = destination.replace(' ', r'\040')
@@ -556,8 +643,20 @@ class JailService(CRUDService):
 
         if action == "list":
             split_list = {}
+            system_mounts = (
+                '/root/bin', '/root/boot', '/root/lib', '/root/libexec',
+                '/root/rescue', '/root/sbin', '/root/usr/bin',
+                '/root/usr/include', '/root/usr/lib', '/root/usr/libexec',
+                '/root/usr/sbin', '/root/usr/share', '/root/usr/libdata',
+                '/root/usr/lib32'
+            )
+
             for i in _list:
-                split_list[i[0]] = i[1].split()
+                fstab_entry = i[1].split()
+                _fstab_type = 'SYSTEM' if fstab_entry[0].endswith(
+                    system_mounts) else 'USER'
+
+                split_list[i[0]] = {'entry': fstab_entry, 'type': _fstab_type}
 
             return split_list
 
@@ -595,7 +694,7 @@ class JailService(CRUDService):
 
     @accepts(
         Str("jail"),
-        List("command"),
+        List("command", default=[]),
         Dict("options", Str("host_user", default="root"), Str("jail_user")))
     def exec(self, jail, command, options):
         """Issues a command inside a jail."""
@@ -712,41 +811,40 @@ class JailService(CRUDService):
         repo and returns a list with the pkg version and plugin revision
         """
         try:
-            pkg_dict = self.middleware.call_sync('cache.get', 'iocage_rpkgdict')
+            pkg_dict = self.middleware.call_sync('cache.get',
+                                                 'iocage_rpkgdict')
             r_plugins = self.middleware.call_sync('cache.get',
                                                   'iocage_rplugins')
-        except ClientException as e:
-            # The jail plugin runs in another process, it's seen as a client
-            if e.trace and e.trace['class'] == 'KeyError':
-                r_pkgs = requests.get('http://pkg.cdn.trueos.org/iocage/All')
-                r_pkgs.raise_for_status()
-                pkg_dict = {}
-                for i in r_pkgs.iter_lines():
-                    i = i.decode().split('"')
+        except KeyError:
+            branch = self.get_version()
+            r_pkgs = requests.get(
+                f'http://pkg.cdn.trueos.org/iocage/{branch}/All')
+            r_pkgs.raise_for_status()
+            pkg_dict = {}
+            for i in r_pkgs.iter_lines():
+                i = i.decode().split('"')
 
-                    try:
-                        pkg, version = i[1].rsplit('-', 1)
-                        pkg_dict[pkg] = version
-                    except (ValueError, IndexError):
-                        continue  # It's not a pkg
-                self.middleware.call_sync(
-                    'cache.put', 'iocage_rpkgdict', pkg_dict,
-                    86400
-                )
+                try:
+                    pkg, version = i[1].rsplit('-', 1)
+                    pkg_dict[pkg] = version
+                except (ValueError, IndexError):
+                    continue  # It's not a pkg
+            self.middleware.call_sync(
+                'cache.put', 'iocage_rpkgdict', pkg_dict,
+                86400
+            )
 
-                r_plugins = requests.get(
-                    'https://raw.githubusercontent.com/freenas/'
-                    'iocage-ix-plugins/master/INDEX'
-                )
-                r_plugins.raise_for_status()
+            r_plugins = requests.get(
+                'https://raw.githubusercontent.com/freenas/'
+                f'iocage-ix-plugins/{branch}/INDEX'
+            )
+            r_plugins.raise_for_status()
 
-                r_plugins = r_plugins.json()
-                self.middleware.call_sync(
-                    'cache.put', 'iocage_rplugins', r_plugins,
-                    86400
-                )
-            else:
-                raise
+            r_plugins = r_plugins.json()
+            self.middleware.call_sync(
+                'cache.put', 'iocage_rplugins', r_plugins,
+                86400
+            )
 
         if pkg == 'bru-server':
             return ['N/A', '1']
@@ -787,7 +885,7 @@ class JailService(CRUDService):
                 if primary_pkg == row[1] or primary_pkg == row[2]:
                     version = [row[3], '1']
                     break
-        except KeyError:
+        except (KeyError, sqlite3.OperationalError):
             version = ['N/A', 'N/A']
 
         return version
@@ -821,6 +919,28 @@ class JailService(CRUDService):
     async def terminate(self):
         await SHUTDOWN_LOCK.acquire()
 
+    @private
+    def get_version(self):
+        """
+        Uses system.version and parses it out for the RELEASE branch we need
+        """
+        r = os.uname().release
+        version = f'{round(float(r.split("-")[0]), 1)}-RELEASE'
+
+        return version
+
+
+async def jail_pool_pre_lock(middleware, pool):
+    """
+    We need to stop jails before unlocking a pool because of used
+    resources in it.
+    """
+    activated_pool = await middleware.call('jail.get_activated_pool')
+    if activated_pool == pool['name']:
+        jails = await middleware.call('jail.query', [('state', '=', 'up')])
+        for j in jails:
+            await middleware.call('jail.stop', j['host_hostuuid'])
+
 
 async def __event_system(middleware, event_type, args):
     """
@@ -837,4 +957,5 @@ async def __event_system(middleware, event_type, args):
 
 
 def setup(middleware):
+    middleware.register_hook('pool.pre_lock', jail_pool_pre_lock)
     middleware.event_subscribe('system', __event_system)

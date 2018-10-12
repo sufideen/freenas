@@ -12,9 +12,9 @@ from functools import wraps
 from threading import Lock
 
 
+# For freenasOS
 if '/usr/local/lib' not in sys.path:
     sys.path.append('/usr/local/lib')
-from freenasOS import Configuration
 
 BUILDTIME = None
 VERSION = None
@@ -158,6 +158,8 @@ def filter_list(_list, filters=None, options=None):
                     if not opmap[op](source, value):
                         valid = False
                         break
+                else:
+                    raise ValueError("Invalid filter {0}".format(f))
             if not valid:
                 continue
             rv.append(i)
@@ -185,6 +187,8 @@ def filter_list(_list, filters=None, options=None):
 
 
 def sw_buildtime():
+    # Lazy import to avoid freenasOS configure logging for us
+    from freenasOS import Configuration
     global BUILDTIME
     if BUILDTIME is None:
         conf = Configuration.Configuration()
@@ -195,6 +199,8 @@ def sw_buildtime():
 
 
 def sw_version():
+    # Lazy import to avoid freenasOS configure logging for us
+    from freenasOS import Configuration
     global VERSION
     if VERSION is None:
         conf = Configuration.Configuration()
@@ -205,6 +211,8 @@ def sw_version():
 
 
 def sw_version_is_stable():
+    # Lazy import to avoid freenasOS configure logging for us
+    from freenasOS import Configuration
     conf = Configuration.Configuration()
     train = conf.CurrentTrain()
     if train and 'stable' in train.lower():
@@ -277,9 +285,14 @@ def load_modules(directory):
         if not f.endswith('.py'):
             continue
         f = f[:-3]
+        name = '.'.join(
+            ['middlewared'] +
+            os.path.relpath(directory, os.path.dirname(os.path.dirname(__file__))).split('/') +
+            [f]
+        )
         fp, pathname, description = imp.find_module(f, [directory])
         try:
-            modules.append(imp.load_module(f, fp, pathname, description))
+            modules.append(imp.load_module(name, fp, pathname, description))
         finally:
             if fp:
                 fp.close()

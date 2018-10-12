@@ -121,20 +121,22 @@ class ServiceService(CRUDService):
             for entry in services
         }
         if jobs:
-            await asyncio.wait(list(jobs.keys()), timeout=15)
+            done, pending = await asyncio.wait(list(jobs.keys()), timeout=15)
 
         def result(task):
             """
-            Method to handle results of the greenlets.
-            In case a greenlet has timed out, provide UNKNOWN state
+            Method to handle results of the coroutines.
+            In case of error or timeout, provide UNKNOWN state.
             """
+            result = None
             try:
-                result = task.result()
+                if task in done:
+                    result = task.result()
             except Exception:
-                result = None
-                self.logger.warn('Failed to get status', exc_info=True)
+                pass
             if result is None:
                 entry = jobs.get(task)
+                self.logger.warn('Failed to get status for %s', entry['service'])
                 entry['state'] = 'UNKNOWN'
                 entry['pids'] = []
                 return entry
@@ -172,6 +174,8 @@ class ServiceService(CRUDService):
         Dict(
             'service-control',
             Bool('onetime', default=True),
+            Bool('wait', default=None, null=True),
+            Bool('sync', default=None, null=True),
             register=True,
         ),
     )
@@ -858,6 +862,10 @@ class ServiceService(CRUDService):
                 res = True
         return res, []
 
+    async def _start_dynamicdns(self, **kwargs):
+        await self._service("ix-inadyn", "start", quiet=True, **kwargs)
+        await self._service("inadyn", "start", **kwargs)
+
     async def _restart_dynamicdns(self, **kwargs):
         await self._service("ix-inadyn", "start", quiet=True, **kwargs)
         await self._service("inadyn", "stop", force=True, **kwargs)
@@ -945,6 +953,9 @@ class ServiceService(CRUDService):
 
     async def _start_loader(self, **kwargs):
         await self._service("ix-loader", "start", quiet=True, **kwargs)
+
+    async def _restart_disk(self, **kwargs):
+        await self._reload_disk(**kwargs)
 
     async def _reload_disk(self, **kwargs):
         await self._service("ix-fstab", "start", quiet=True, **kwargs)

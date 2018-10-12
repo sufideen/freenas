@@ -39,9 +39,8 @@ from django.utils.translation import ugettext_lazy as _
 from OpenSSL import crypto
 
 from freenasUI import choices
-from freenasUI.freeadmin.models import DictField, EncryptedDictField, Model, UserField
+from freenasUI.freeadmin.models import DictField, EncryptedDictField, ListField, Model, UserField
 from freenasUI.middleware.notifier import notifier
-from freenasUI.middleware.util import run_alerts
 from freenasUI.support.utils import get_license
 from licenselib.license import ContractType
 
@@ -75,16 +74,14 @@ class Settings(Model):
         blank=True,
         null=True
     )
-    stg_guiaddress = models.CharField(
-        max_length=120,
+    stg_guiaddress = ListField(
         blank=True,
-        default='0.0.0.0',
+        default=['0.0.0.0'],
         verbose_name=_("WebGUI IPv4 Address")
     )
-    stg_guiv6address = models.CharField(
-        max_length=120,
+    stg_guiv6address = ListField(
         blank=True,
-        default='::',
+        default=['::'],
         verbose_name=_("WebGUI IPv6 Address")
     )
     stg_guiport = models.IntegerField(
@@ -213,11 +210,6 @@ class NTPServer(Model):
 
     def __str__(self):
         return self.ntp_address
-
-    def delete(self):
-        super(NTPServer, self).delete()
-        notifier().start("ix-ntpd")
-        notifier().restart("ntpd")
 
     class Meta:
         verbose_name = _("NTP Server")
@@ -492,13 +484,6 @@ class Tunable(Model):
     def __str__(self):
         return str(self.tun_var)
 
-    def delete(self):
-        super(Tunable, self).delete()
-        if self.tun_type == 'loader':
-            notifier().reload("loader")
-        else:
-            notifier().reload("sysctl")
-
     class Meta:
         verbose_name = _("Tunable")
         verbose_name_plural = _("Tunables")
@@ -736,6 +721,13 @@ class CertificateBase(Model):
         max_length=120,
         verbose_name=_("Organization"),
         help_text=_("Organization Name (eg, company)"),
+    )
+    cert_organizational_unit = models.CharField(
+        blank=True,
+        null=True,
+        max_length=120,
+        verbose_name=_("Organizational Unit"),
+        help_text=_("Organizational unit of the entity"),
     )
     cert_email = models.CharField(
         blank=True,
@@ -1016,34 +1008,12 @@ class CertificateAuthority(CertificateBase):
         if not os.path.exists(self.cert_root_path):
             os.mkdir(self.cert_root_path, 0o755)
 
-    def delete(self):
-        temp_cert_name = self.cert_name
-        super(CertificateAuthority, self).delete()
-        # If this was a malformed CA then delete its alert sentinel file
-        try:
-            os.unlink('/tmp/alert_invalidCA_{0}'.format(temp_cert_name))
-            run_alerts()
-        except OSError:
-            # It was not a malformed CA after all!
-            pass
-
     class Meta:
         verbose_name = _("CA")
         verbose_name_plural = _("CAs")
 
 
 class Certificate(CertificateBase):
-
-    def delete(self):
-        temp_cert_name = self.cert_name
-        super(Certificate, self).delete()
-        # If this was a malformed CA then delete its alert sentinel file
-        try:
-            os.unlink('/tmp/alert_invalidcert_{0}'.format(temp_cert_name))
-            run_alerts()
-        except OSError:
-            # It was not a malformed CA after all!
-            pass
 
     class Meta:
         verbose_name = _("Certificate")
