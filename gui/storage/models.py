@@ -42,7 +42,7 @@ from freenasUI.middleware import zfs
 from freenasUI.middleware.notifier import notifier
 from freenasUI.middleware.client import client
 from freenasUI.freeadmin.models import Model, UserField
-from freenasUI.system.models import KeychainCredential
+from freenasUI.system.models import SSHCredentialsKeychainCredential
 
 log = logging.getLogger('storage.models')
 REPL_RESULTFILE = '/tmp/.repl-result'
@@ -448,18 +448,18 @@ class Replication(Model):
         max_length=4,
         choices=[("PUSH", "Push"), ("PULL", "Pull")],
         default="push",
-        verbose_name=_("Replication Direction"),
+        verbose_name=_("Direction"),
     )
     repl_transport = models.CharField(
         max_length=10,
         choices=[("SSH", "SSH"), ("SSH+NETCAT", "SSH+netcat"), ("LOCAL", "Local"), ("LEGACY", "Legacy")],
         default="ssh",
-        verbose_name=_("Replication Transport"),
+        verbose_name=_("Transport"),
     )
     repl_ssh_credentials = models.ForeignKey(
-        KeychainCredential,
+        SSHCredentialsKeychainCredential,
         null=True,
-        verbose_name=_("Remote Host"),
+        verbose_name=_("SSH Connection"),
     )
     repl_netcat_active_side = models.CharField(
         max_length=5,
@@ -494,7 +494,11 @@ class Replication(Model):
     repl_exclude = ListField(
         verbose_name=_("Exclude child datasets"),
     )
-    repl_tasks = models.ManyToManyField("Task", related_name="replication_tasks")
+    repl_tasks = models.ManyToManyField(
+        "Task",
+        related_name="replication_tasks",
+        verbose_name=_("Periodic snapshot tasks"),
+    )
     repl_naming_schema = ListField(
         verbose_name=_("Also replicate snapshots matching naming schema"),
     )
@@ -578,7 +582,7 @@ class Replication(Model):
         max_length=5,
         choices=choices.Repl_CompressionChoices,
         default="LZ4",
-        verbose_name=_("Replication Stream Compression"),
+        verbose_name=_("Stream Compression"),
     )
     repl_speed_limit = models.IntegerField(
         null=True,

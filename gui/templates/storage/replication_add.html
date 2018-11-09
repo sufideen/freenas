@@ -3,7 +3,11 @@
 {{ block.super }}
 <script type="dojo/method">
 addToStack(function() {
-  repliRemoteMode();
+  replicationDirectionToggle();
+  replicationTransportToggle();
+  replicationRecursiveToggle();
+  replicationAutoToggle();
+  replicationRetentionPolicyToggle();
 });
 </script>
 {% endblock %}

@@ -1758,6 +1758,7 @@ class PeriodicSnapForm(MiddlewareModelForm, ModelForm):
 
     task_exclude = forms.CharField(
         required=False,
+        label=_("Exclude"),
         widget=forms.Textarea(),
     )
 
@@ -2070,6 +2071,136 @@ class ReplicationForm(MiddlewareModelForm, ModelForm):
     middleware_plugin = "replication"
     is_singletone = False
 
+    repl_source_datasets = forms.CharField(
+        label=_("Source Datasets"),
+        widget=forms.Textarea(),
+    )
+    repl_exclude = forms.CharField(
+        required=False,
+        label=_("Exclude child datasets"),
+        widget=forms.Textarea(),
+    )
+    repl_naming_schema = forms.CharField(
+        required=False,
+        label=_("Naming schema"),
+        widget=forms.Textarea(),
+    )
+    repl_compression = forms.ChoiceField(
+        label=_("Stream Compression"),
+        choices=((None, "disabled"),) + choices.Repl_CompressionChoices,
+    )
+
+    class Meta:
+        fields = "__all__"
+        model = models.Replication
+
+        widgets = {
+            'repl_minute': CronMultiple(
+                attrs={'numChoices': 60, 'label': _("minute")}
+            ),
+            'repl_hour': CronMultiple(
+                attrs={'numChoices': 24, 'label': _("hour")}
+            ),
+            'repl_daymonth': CronMultiple(
+                attrs={
+                    'numChoices': 31, 'start': 1, 'label': _("day of month"),
+                }
+            ),
+            'repl_dayweek': forms.CheckboxSelectMultiple(
+                choices=choices.WEEKDAYS_CHOICES
+            ),
+            'repl_month': forms.CheckboxSelectMultiple(
+                choices=choices.MONTHS_CHOICES
+            ),
+
+            'repl_begin': forms.widgets.TimeInput(attrs={
+                'constraints': mark_safe("{timePattern:'HH:mm:ss',}"),
+            }),
+            'repl_end': forms.widgets.TimeInput(attrs={
+                'constraints': mark_safe("{timePattern:'HH:mm:ss',}"),
+            }),
+        }
+
+    def __init__(self, *args, **kwargs):
+        if len(args) > 0 and isinstance(args[0], QueryDict):
+            new = args[0].copy()
+            fix_time_fields(new, ['repl_begin', 'repl_end'])
+            args = (new,) + args[1:]
+
+        if "instance" in kwargs:
+            kwargs.setdefault("initial", {})
+
+            kwargs["initial"]["repl_source_datasets"] = "\n".join(kwargs["instance"].repl_source_datasets)
+            kwargs["initial"]["repl_exclude"] = "\n".join(kwargs["instance"].repl_exclude)
+            kwargs["initial"]["repl_naming_schema"] = "\n".join(kwargs["instance"].repl_naming_schema)
+
+        super().__init__(*args, **kwargs)
+
+        mchoicefield(self, 'repl_month', [
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12
+        ])
+        mchoicefield(self, 'repl_dayweek', [
+            1, 2, 3, 4, 5, 6, 7
+        ])
+
+        self.fields['repl_direction'].widget.attrs['onChange'] = "replicationDirectionToggle();"
+        self.fields['repl_transport'].widget.attrs['onChange'] = "replicationTransportToggle();"
+        self.fields['repl_recursive'].widget.attrs['onChange'] = "replicationRecursiveToggle();"
+        self.fields['repl_auto'].widget.attrs['onChange'] = "replicationAutoToggle();"
+        self.fields['repl_retention_policy'].widget.attrs['onChange'] = "replicationRetentionPolicyToggle();"
+
+    def clean_repl_source_datasets(self):
+        return self.cleaned_data.get('repl_source_datasets').split()
+
+    def clean_repl_exclude(self):
+        return self.cleaned_data.get('repl_exclude').split()
+
+    def clean_repl_naming_schema(self):
+        return self.cleaned_data.get('repl_naming_schema').split()
+
+    def clean_repl_month(self):
+        m = self.data.getlist('repl_month')
+        if len(m) == 12:
+            return '*'
+        m = ','.join(m)
+        return m
+
+    def clean_repl_dayweek(self):
+        w = self.data.getlist('repl_dayweek')
+        if w == '*':
+            return w
+        if len(w) == 7:
+            return '*'
+        w = ','.join(w)
+        return w
+
+    def clean_repl_begin(self):
+        begin = self.cleaned_data.get('repl_begin')
+        return begin.strftime('%H:%M')
+
+    def clean_repl_end(self):
+        end = self.cleaned_data.get('repl_end')
+        return end.strftime('%H:%M')
+
+    def middleware_clean(self, data):
+        data['schedule'] = {
+            'minute': data.pop('minute'),
+            'hour': data.pop('hour'),
+            'dom': data.pop('daymonth'),
+            'month': data.pop('month'),
+            'dow': data.pop('dayweek'),
+            'begin': data.pop('begin'),
+            'end': data.pop('end'),
+        }
+        return data
+
+    """
+
+    middleware_attr_prefix = "repl_"
+    middleware_attr_schema = "replication"
+    middleware_plugin = "replication"
+    is_singletone = False
+
     repl_remote_mode = forms.ChoiceField(
         label=_('Setup mode'),
         choices=(
@@ -2240,18 +2371,7 @@ class ReplicationForm(MiddlewareModelForm, ModelForm):
             data['remote_port'] = remote_port
 
         return data
-
-
-class ReplRemoteForm(ModelForm):
-
-    class Meta:
-        fields = '__all__'
-        model = models.Task
-
-    def save(self):
-        rv = super(ReplRemoteForm, self).save()
-        notifier().reload("ssh")
-        return rv
+    """
 
 
 class VolumeExport(Form):

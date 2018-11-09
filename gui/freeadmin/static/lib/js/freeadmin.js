@@ -498,6 +498,33 @@ require([
 
     var canceled = false;
 
+    hideGeneric = function(checkboxid, farray, inverted) {
+
+        if(inverted == undefined) inverted = false;
+
+        var box = registry.byId(checkboxid);
+        if(inverted == true) {
+            toset = !box.get("value");
+        } else{
+            toset = box.get("value");
+        }
+        for(var i=0;i<farray.length;i++) {
+            var widget = registry.byId(farray[i]);
+            if(widget) {
+                domStyle.set(widget.domNode.parentNode.parentNode, 'display', toset ? '' : 'none');
+            }
+            else
+            {
+                var widget = registry.byId(farray[i] + "_0");
+                if (widget) {
+                    domStyle.set(widget.domNode.parentNode.parentNode.parentNode.parentNode.parentNode,
+                                 'display', toset ? '' : 'none');
+                }
+            }
+        }
+
+    }
+
     toggleGeneric = function(checkboxid, farray, inverted) {
 
         if(inverted == undefined) inverted = false;
@@ -1342,6 +1369,79 @@ require([
             domStyle.set(trpa, "display", "none");
         }
 
+    }
+
+    replicationDirectionToggle = function() {
+        if (registry.byId("id_repl_direction").get("value") == "PUSH")
+        {
+            document.querySelector('label[for="id_repl_naming_schema"]').innerHTML = "Also include naming schema";
+        }
+        else
+        {
+            document.querySelector('label[for="id_repl_naming_schema"]').innerHTML = "Naming schema";
+        }
+    }
+
+    replicationTransportToggle = function() {
+        var newFeatures = ["repl_exclude", "repl_naming_schema", "repl_auto", "repl_only_matching_schedule",
+                           "repl_allow_from_scratch", "repl_hold_pending_snapshots", "repl_retention_policy",
+                           "repl_dedup", "repl_large_block", "repl_embed", "repl_compressed", "repl_retries"];
+        var modes = {
+            "SSH": newFeatures.concat(["ssh_credentials", "repl_compression", "repl_speed_limit"]),
+            "SSH+NETCAT": newFeatures.concat(["ssh_credentials", "netcat_active_side", "netcat_active_side_port_min",
+                                              "netcat_active_side_port_max"]),
+            "LOCAL": newFeatures.concat([]),
+            "LEGACY": newFeatures.concat(["ssh_credentials"]),
+        };
+        for (var k in modes)
+        {
+            var fields = modes[k];
+            for (var i in fields)
+            {
+                var name = fields[i];
+                domStyle.set(registry.byId("id_repl_" + name).domNode.parentNode.parentNode, "display", "none");
+            }
+        }
+
+        var fields = modes[registry.byId("id_repl_transport").get("value")];
+        for (var i in fields)
+        {
+            var name = fields[i];
+            domStyle.set(registry.byId("id_repl_" + name).domNode.parentNode.parentNode, "display", "");
+        }
+    }
+
+    replicationRecursiveToggle = function() {
+        hideGeneric("id_repl_recursive", ["id_repl_exclude"]);
+    }
+
+    replicationAutoToggle = function() {
+        hideGeneric("id_repl_auto", ["id_repl_minute", "id_repl_hour", "id_repl_month", "id_repl_daymonth",
+                                     "id_repl_dayweek", "id_repl_begin", "id_repl_end"]);
+    }
+
+    replicationRetentionPolicyToggle = function() {
+        var policies = {
+            "SOURCE": [],
+            "CUSTOM": ["lifetime_value", "lifetime_unit"],
+            "NONE": [],
+        };
+        for (var k in policies)
+        {
+            var fields = policies[k];
+            for (var i in fields)
+            {
+                var name = fields[i];
+                domStyle.set(registry.byId("id_repl_" + name).domNode.parentNode.parentNode, "display", "none");
+            }
+        }
+
+        var fields = policies[registry.byId("id_repl_retention_policy").get("value")];
+        for (var i in fields)
+        {
+            var name = fields[i];
+            domStyle.set(registry.byId("id_repl_" + name).domNode.parentNode.parentNode, "display", "");
+        }
     }
 
     deviceTypeToggle = function() {
